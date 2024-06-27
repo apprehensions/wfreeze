@@ -1,18 +1,15 @@
 .POSIX:
 
-VERSION = 0
-
 PREFIX = /usr/local
 
 PKG_CONFIG = pkg-config
 
-PKGS = wayland-client xkbcommon
+PKGS = wayland-client
 INCS = `$(PKG_CONFIG) --cflags $(PKGS)`
 LIBS = `$(PKG_CONFIG) --libs $(PKGS)`
 
-WLCPPFLAGS = -DVERSION=\"$(VERSION)\"
-WLCFLAGS   = -pedantic -Wall $(INCS) $(WLCPPFLAGS) $(CPPFLAGS) $(CFLAGS)
-LDLIBS     = $(LIBS) -lcrypt
+WFCFLAGS = -pedantic -Wall $(INCS) $(CPPFLAGS) $(CFLAGS)
+LDLIBS   = $(LIBS)
 
 SRC = wfreeze.c xdg-shell-protocol.c wlr-layer-shell-unstable-v1-protocol.c \
       wlr-screencopy-unstable-v1-protocol.c
@@ -21,7 +18,7 @@ OBJ = $(SRC:.c=.o)
 all: wfreeze
 
 .c.o:
-	$(CC) -o $@ $(WLCFLAGS) -c $<
+	$(CC) -o $@ $(WFCFLAGS) -c $<
 
 wfreeze.o: wlr-layer-shell-unstable-v1-protocol.h wlr-screencopy-unstable-v1-protocol.h
 
@@ -53,7 +50,7 @@ clean:
 install: all
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	cp -f wfreeze $(DESTDIR)$(PREFIX)/bin
-	chmod 4755 $(DESTDIR)$(PREFIX)/bin/wfreeze
+	chmod 0755 $(DESTDIR)$(PREFIX)/bin/wfreeze
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/wfreeze
