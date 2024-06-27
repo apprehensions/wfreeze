@@ -1,0 +1,3 @@
+wlock
+*.o
+*-protocol.*
