@@ -180,7 +180,7 @@ output_handle_done(void *data, struct wl_output *wl_output)
 	output->surface = wl_compositor_create_surface(compositor);
 	output->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 		layer_shell, output->surface, output->wl_output,
-		ZWLR_LAYER_SHELL_V1_LAYER_TOP, "freeze");
+		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "freeze");
 
 	wl_surface_set_buffer_transform(output->surface, output->transform);
 
