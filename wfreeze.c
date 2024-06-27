@@ -23,6 +23,8 @@ typedef struct {
 	struct zwlr_screencopy_frame_v1 *frame;
 	struct wl_surface *surface;
 	struct zwlr_layer_surface_v1 *layer_surface;
+	uint32_t flags;
+	int32_t transform;
 	PoolBuf *buffer;
 	bool ready, configured;
 
@@ -64,6 +66,11 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 		return;
 	}
 
+	if (output->flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) {
+		wl_surface_set_buffer_transform(output->surface,
+			WL_OUTPUT_TRANSFORM_FLIPPED_180);
+	}
+
 	wl_surface_attach(output->surface, output->buffer->wl_buf, 0, 0);
 	wl_surface_commit(output->surface);
 	output->configured = true;
@@ -91,8 +98,17 @@ screencopy_frame_handle_buffer(void *data,
 		poolbuf_destroy(output->buffer);
 
 	output->buffer = poolbuf_create(shm, format, width, height, stride);
-	zwlr_screencopy_frame_v1_copy(frame, output->buffer->wl_buf);
+	zwlr_screencopy_frame_v1_copy(output->frame, output->buffer->wl_buf);
 }
+
+static void
+screencopy_frame_handle_flags(void *data,
+	struct zwlr_screencopy_frame_v1 *frame, uint32_t flags)
+{
+	Output *output = data;
+	output->flags = flags;
+}
+
 
 static void
 screencopy_frame_handle_ready(void *data,
@@ -117,7 +133,7 @@ screencopy_frame_handle_failed(void *data,
 
 static const struct zwlr_screencopy_frame_v1_listener screencopy_frame_listener = {
 	.buffer = screencopy_frame_handle_buffer,
-	.flags = noop,
+	.flags = screencopy_frame_handle_flags,
 	.ready = screencopy_frame_handle_ready,
 	.failed = screencopy_frame_handle_failed,
 };
@@ -142,6 +158,14 @@ outputs_destroy(void)
 		output_destroy(output);
 }
 
+static void
+output_handle_geometry(void *data, struct wl_output *wl_output,
+		int32_t x, int32_t y, int32_t w, int32_t h,
+		int32_t subpixel, const char *make, const char *model, int32_t transform)
+{
+	Output *output = data;
+	output->transform = transform;
+}
 
 static void 
 output_handle_done(void *data, struct wl_output *wl_output)
@@ -158,6 +182,8 @@ output_handle_done(void *data, struct wl_output *wl_output)
 		layer_shell, output->surface, output->wl_output,
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP, "freeze");
 
+	wl_surface_set_buffer_transform(output->surface, output->transform);
+
 	zwlr_layer_surface_v1_add_listener(output->layer_surface,
 		&layer_surface_listener, output);
 	zwlr_layer_surface_v1_set_exclusive_zone(output->layer_surface, -1);
@@ -167,7 +193,7 @@ output_handle_done(void *data, struct wl_output *wl_output)
 }
 
 static const struct wl_output_listener output_listener = {
-	.geometry = noop,
+	.geometry = output_handle_geometry,
 	.mode = noop,
 	.done = output_handle_done,
 	.scale = noop,
