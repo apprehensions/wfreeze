@@ -1,16 +1,10 @@
 #define _DEFAULT_SOURCE
 #include <err.h>
-#include <errno.h>
-#include <getopt.h>
-#include <limits.h>
-#include <pwd.h>
-#include <shadow.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <unistd.h>
+#include <sys/wait.h>
 #include <wayland-client.h>
 
 #include "poolbuf.h"
@@ -26,7 +20,7 @@ typedef struct {
 	uint32_t flags;
 	int32_t transform;
 	PoolBuf *buffer;
-	bool ready, configured;
+	bool ready, frozen;
 
 	struct wl_list link;
 } Output;
@@ -39,8 +33,6 @@ static struct zwlr_layer_shell_v1 *layer_shell;
 static struct zwlr_screencopy_manager_v1 *screencopy_manager;
 
 static struct wl_list outputs;
-
-static bool running = false;
 
 static void
 noop()
@@ -61,11 +53,6 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 	if (!output->ready)
 		return;
 
-	if (output->configured) {
-		wl_surface_commit(output->surface);
-		return;
-	}
-
 	if (output->flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) {
 		wl_surface_set_buffer_transform(output->surface,
 			WL_OUTPUT_TRANSFORM_FLIPPED_180);
@@ -73,18 +60,12 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 
 	wl_surface_attach(output->surface, output->buffer->wl_buf, 0, 0);
 	wl_surface_commit(output->surface);
-	output->configured = true;
-}
-
-static void
-layer_surface_closed(void *data, struct zwlr_layer_surface_v1 *layer_surface)
-{
-	abort();
+	output->frozen = true;
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
-    .configure = &layer_surface_configure,
-    .closed = &layer_surface_closed,
+    .configure = layer_surface_configure,
+    .closed = noop,
 };
 
 static void
@@ -109,7 +90,6 @@ screencopy_frame_handle_flags(void *data,
 	output->flags = flags;
 }
 
-
 static void
 screencopy_frame_handle_ready(void *data,
 		struct zwlr_screencopy_frame_v1 *frame, uint32_t tv_sec_hi,
@@ -128,7 +108,10 @@ static void
 screencopy_frame_handle_failed(void *data,
 		struct zwlr_screencopy_frame_v1 *frame)
 {
-	abort();
+	Output *output = data;
+
+	fprintf(stderr, "failed to copy output %d\n", output->wl_name);
+	exit(EXIT_FAILURE);
 }
 
 static const struct zwlr_screencopy_frame_v1_listener screencopy_frame_listener = {
@@ -190,6 +173,7 @@ output_handle_done(void *data, struct wl_output *wl_output)
 	zwlr_layer_surface_v1_set_anchor(output->layer_surface,
 		ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
 		ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+		
 }
 
 static const struct wl_output_listener output_listener = {
@@ -224,28 +208,16 @@ registry_global(void *data, struct wl_registry *registry,
 	}
 }
 
-static void
-registry_global_remove(void *data,
-		struct wl_registry *registry, uint32_t name)
-{
-	Output *output, *tmp;
-
-	wl_list_for_each_safe(output, tmp, &outputs, link) {
-		if (output->wl_name == name) {
-			output_destroy(output);
-			break;
-		}
-	}
-}
-
 static const struct wl_registry_listener registry_listener = {
 	.global = registry_global,
-	.global_remove = registry_global_remove,
+	.global_remove = noop,
 };
 
 static void
 setup(void)
 {
+	Output *output;
+
 	if (!(display = wl_display_connect(NULL)))
 		errx(EXIT_FAILURE, "failed to connect to wayland");
 
@@ -260,6 +232,11 @@ setup(void)
 
 	if (wl_list_empty(&outputs))
 		errx(EXIT_FAILURE, "no outputs");
+
+	wl_list_for_each(output, &outputs, link)
+		do
+			wl_display_dispatch(display);
+		while (!output->frozen);
 }
 
 static void
@@ -277,12 +254,30 @@ cleanup(void)
 int
 main(int argc, char *argv[])
 {
+	pid_t pid;
+	int status;
+
+	if (argc < 2) {
+		fprintf(stderr, "usage: %s cmd [arg ...]\n", argv[0]);
+		return EXIT_FAILURE;
+	} else {
+		argc--;
+		argv++;
+	}
+
 	setup();
 
-	while (wl_display_dispatch(display) > 0)
+	switch ((pid = fork())) {
+	case -1:
+		err(EXIT_FAILURE, "fork");
+	case 0:
+		execvp(argv[0], argv);
+		err(EXIT_FAILURE, "execvp");
+	}
+	while (waitpid(pid, &status, WNOHANG) != pid)
 		;
 
 	cleanup();
 
-	return EXIT_SUCCESS;
+	return (WIFEXITED(status)) ? WEXITSTATUS(status) : EXIT_FAILURE;
 }
