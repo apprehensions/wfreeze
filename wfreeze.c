@@ -12,7 +12,6 @@
 #include "wlr-screencopy-unstable-v1-protocol.h"
 
 typedef struct {
-	uint32_t wl_name;
 	struct wl_output *wl_output;
 	struct zwlr_screencopy_frame_v1 *frame;
 	struct wl_surface *surface;
@@ -20,7 +19,7 @@ typedef struct {
 	uint32_t flags;
 	int32_t transform;
 	PoolBuf *buffer;
-	bool ready, frozen;
+	bool frozen;
 
 	struct wl_list link;
 } Output;
@@ -50,17 +49,12 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 
 	zwlr_layer_surface_v1_ack_configure(surface, serial);
 
-	if (!output->ready)
-		return;
-
 	if (output->flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) {
 		wl_surface_set_buffer_transform(output->surface,
 			WL_OUTPUT_TRANSFORM_FLIPPED_180);
 	}
 
-	wl_surface_attach(output->surface, output->buffer->wl_buf, 0, 0);
 	wl_surface_commit(output->surface);
-	output->frozen = true;
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
@@ -74,9 +68,6 @@ screencopy_frame_handle_buffer(void *data,
 		uint32_t format, uint32_t width, uint32_t height, uint32_t stride)
 {
 	Output *output = data;
-
-	if (output->buffer)
-		poolbuf_destroy(output->buffer);
 
 	output->buffer = poolbuf_create(shm, format, width, height, stride);
 	zwlr_screencopy_frame_v1_copy(output->frame, output->buffer->wl_buf);
@@ -98,20 +89,16 @@ screencopy_frame_handle_ready(void *data,
 	Output *output = data;
 
 	zwlr_screencopy_frame_v1_destroy(output->frame);
-	output->frame = NULL;
-
-	output->ready = true;
 	wl_surface_commit(output->surface);
+	wl_surface_attach(output->surface, output->buffer->wl_buf, 0, 0);
+	poolbuf_destroy(output->buffer);
 }
 
 static void
 screencopy_frame_handle_failed(void *data,
 		struct zwlr_screencopy_frame_v1 *frame)
 {
-	Output *output = data;
-
-	fprintf(stderr, "failed to copy output %d\n", output->wl_name);
-	exit(EXIT_FAILURE);
+	errx(EXIT_FAILURE, "failed to copy output frame");
 }
 
 static const struct zwlr_screencopy_frame_v1_listener screencopy_frame_listener = {
@@ -122,10 +109,22 @@ static const struct zwlr_screencopy_frame_v1_listener screencopy_frame_listener 
 };
 
 static void
+surface_handle_enter(void *data, struct wl_surface *surface,
+		struct wl_output *_output)
+{
+	Output *output = data;
+	output->frozen = true;
+}
+
+static const struct wl_surface_listener surface_listener = {
+	.enter = surface_handle_enter,
+	.leave = noop
+};
+
+static void
 output_destroy(Output *output)
 {
 	wl_list_remove(&output->link);
-	poolbuf_destroy(output->buffer);
 	zwlr_layer_surface_v1_destroy(output->layer_surface);
 	wl_surface_destroy(output->surface);
 	wl_output_destroy(output->wl_output);
@@ -142,6 +141,29 @@ outputs_destroy(void)
 }
 
 static void
+output_setup(Output *output)
+{
+	output->frame = zwlr_screencopy_manager_v1_capture_output(
+		screencopy_manager, 0, output->wl_output);
+	zwlr_screencopy_frame_v1_add_listener(output->frame,
+		&screencopy_frame_listener, output);
+
+	output->surface = wl_compositor_create_surface(compositor);
+	wl_surface_add_listener(output->surface, &surface_listener, output);
+	wl_surface_set_buffer_transform(output->surface, output->transform);
+	
+	output->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+		layer_shell, output->surface, output->wl_output,
+		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "freeze");
+	zwlr_layer_surface_v1_add_listener(output->layer_surface,
+		&layer_surface_listener, output);
+	zwlr_layer_surface_v1_set_exclusive_zone(output->layer_surface, -1);
+	zwlr_layer_surface_v1_set_anchor(output->layer_surface,
+		ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
+		ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+}
+
+static void
 output_handle_geometry(void *data, struct wl_output *wl_output,
 		int32_t x, int32_t y, int32_t w, int32_t h,
 		int32_t subpixel, const char *make, const char *model, int32_t transform)
@@ -150,36 +172,10 @@ output_handle_geometry(void *data, struct wl_output *wl_output,
 	output->transform = transform;
 }
 
-static void 
-output_handle_done(void *data, struct wl_output *wl_output)
-{
-	Output *output = data;
-
-	output->frame = zwlr_screencopy_manager_v1_capture_output(
-		screencopy_manager, 0, output->wl_output);
-	zwlr_screencopy_frame_v1_add_listener(output->frame,
-		&screencopy_frame_listener, output);
-
-	output->surface = wl_compositor_create_surface(compositor);
-	output->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-		layer_shell, output->surface, output->wl_output,
-		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "freeze");
-
-	wl_surface_set_buffer_transform(output->surface, output->transform);
-
-	zwlr_layer_surface_v1_add_listener(output->layer_surface,
-		&layer_surface_listener, output);
-	zwlr_layer_surface_v1_set_exclusive_zone(output->layer_surface, -1);
-	zwlr_layer_surface_v1_set_anchor(output->layer_surface,
-		ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
-		ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
-		
-}
-
 static const struct wl_output_listener output_listener = {
 	.geometry = output_handle_geometry,
 	.mode = noop,
-	.done = output_handle_done,
+	.done = noop,
 	.scale = noop,
 	.name = noop,
 	.description = noop,
@@ -202,7 +198,6 @@ registry_global(void *data, struct wl_registry *registry,
 	else if (!strcmp(interface, wl_output_interface.name)) {
 		Output *output = calloc(1, sizeof(Output));
 		output->wl_output = wl_registry_bind(registry, name, &wl_output_interface, 4);
-		output->wl_name = name;
 		wl_list_insert(&outputs, &output->link);
 		wl_output_add_listener(output->wl_output, &output_listener, output);
 	}
@@ -234,9 +229,11 @@ setup(void)
 		errx(EXIT_FAILURE, "no outputs");
 
 	wl_list_for_each(output, &outputs, link)
-		do
+		output_setup(output);
+
+	wl_list_for_each(output, &outputs, link)
+		while (!output->frozen)
 			wl_display_dispatch(display);
-		while (!output->frozen);
 }
 
 static void
@@ -254,28 +251,26 @@ cleanup(void)
 int
 main(int argc, char *argv[])
 {
-	pid_t pid;
 	int status;
 
 	if (argc < 2) {
 		fprintf(stderr, "usage: %s cmd [arg ...]\n", argv[0]);
 		return EXIT_FAILURE;
-	} else {
-		argc--;
-		argv++;
-	}
+	} 
+	argc--;
+	argv++;
 
 	setup();
 
-	switch ((pid = fork())) {
+	switch (fork()) {
 	case -1:
 		err(EXIT_FAILURE, "fork");
 	case 0:
 		execvp(argv[0], argv);
 		err(EXIT_FAILURE, "execvp");
 	}
-	while (waitpid(pid, &status, WNOHANG) != pid)
-		;
+	if (waitpid(-1, &status, 0) < 0)
+		err(EXIT_FAILURE, "waitpid");
 
 	cleanup();
 
