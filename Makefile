@@ -8,8 +8,9 @@ PKGS = wayland-client
 INCS != $(PKG_CONFIG) --cflags $(PKGS)
 LIBS != $(PKG_CONFIG) --libs $(PKGS)
 
-WFCFLAGS = -pedantic -Wall $(INCS) $(CPPFLAGS) $(CFLAGS)
-LDLIBS   = $(LIBS)
+WFCPPFLAGS = -D_GNU_SOURCE $(CPPFLAGS)
+WFCFLAGS   = -pedantic -Wall $(INCS) $(WFCPPFLAGS) $(CFLAGS)
+LDLIBS     = $(LIBS)
 
 PROTO = xdg-shell-protocol.h wlr-layer-shell-unstable-v1-protocol.h wlr-screencopy-unstable-v1-protocol.h
 SRC = wfreeze.c $(PROTO:.h=.c)

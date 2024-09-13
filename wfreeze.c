@@ -1,13 +1,19 @@
-#define _DEFAULT_SOURCE
 #include <err.h>
+#include <fcntl.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <wayland-client.h>
+#ifdef __linux__
+#include <linux/memfd.h>
+#endif
 
-#include "poolbuf.h"
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "wlr-screencopy-unstable-v1-protocol.h"
 
@@ -17,18 +23,18 @@ typedef struct {
 	struct zwlr_screencopy_frame_v1 *frame;
 	struct wl_surface *surface;
 	struct zwlr_layer_surface_v1 *layer_surface;
+	struct wl_buffer *buffer;
 	uint32_t flags;
 	int32_t transform;
-	PoolBuf *buffer;
-	bool ready, frozen;
+	bool attached, frozen;
 
 	struct wl_list link;
 } Output;
 
 static struct wl_display *display;
 static struct wl_registry *registry;
-static struct wl_shm *shm;
 static struct wl_compositor *compositor;
+static struct wl_shm *shm;
 static struct zwlr_layer_shell_v1 *layer_shell;
 static struct zwlr_screencopy_manager_v1 *screencopy_manager;
 
@@ -42,25 +48,84 @@ noop()
 	 */
 }
 
+static struct wl_buffer *
+buffershm_create(struct wl_shm *shm, enum wl_shm_format format,
+		int32_t width, int32_t height, int32_t stride)
+{
+	int fd;
+	struct wl_shm_pool *shm_pool;
+	struct wl_buffer *buffer;
+	int32_t size = stride * height;
+
+#if defined(__linux__) || \
+	((defined(__FreeBSD__) && (__FreeBSD_version >= 1300048)))
+	fd = memfd_create("output-shm-buffer-pool",
+		MFD_CLOEXEC | MFD_ALLOW_SEALING |
+#if defined(MFD_NOEXEC_SEAL)
+		MFD_NOEXEC_SEAL
+#else
+		0
+#endif
+	);
+#else
+	char template[] = "/tmp/outputbuf-XXXXXX";
+#if defined(__OpenBSD__)
+	fd = shm_mkstemp(template);
+#else
+	fd = mkostemp(template, O_CLOEXEC);
+#endif
+	if (fd < 0)
+		return NULL;
+#if defined(__OpenBSD__)
+    shm_unlink(template);
+#else
+	unlink(template);
+#endif
+#endif
+
+	if ((ftruncate(fd, size)) < 0) {
+		close(fd);
+		return NULL;
+	}
+
+#if defined(__linux__) || \
+	((defined(__FreeBSD__) && (__FreeBSD_version >= 1300048)))
+	fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
+#endif
+
+	shm_pool = wl_shm_create_pool(shm, fd, size);
+	buffer = wl_shm_pool_create_buffer(shm_pool, 0,
+		width, height, stride, format);
+	wl_shm_pool_destroy(shm_pool);
+	close(fd);
+
+	return buffer;
+}
+
 static void
 layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
                         uint32_t serial, uint32_t w, uint32_t h)
 {
 	Output *output = data;
 
+	if (output->frame)
+		return;
+
 	zwlr_layer_surface_v1_ack_configure(surface, serial);
 
-	if (!output->ready)
+	if (output->attached) {
+		wl_surface_commit(output->surface);
 		return;
+	}
 
 	if (output->flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) {
 		wl_surface_set_buffer_transform(output->surface,
 			WL_OUTPUT_TRANSFORM_FLIPPED_180);
 	}
 
-	wl_surface_attach(output->surface, output->buffer->wl_buf, 0, 0);
+	wl_surface_attach(output->surface, output->buffer, 0, 0);
 	wl_surface_commit(output->surface);
-	output->frozen = true;
+	output->attached = true;
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
@@ -76,10 +141,10 @@ screencopy_frame_handle_buffer(void *data,
 	Output *output = data;
 
 	if (output->buffer)
-		poolbuf_destroy(output->buffer);
-
-	output->buffer = poolbuf_create(shm, format, width, height, stride);
-	zwlr_screencopy_frame_v1_copy(output->frame, output->buffer->wl_buf);
+		wl_buffer_destroy(output->buffer);
+	if (!(output->buffer = buffershm_create(shm, format, width, height, stride)))
+		err(EXIT_FAILURE, "buffershm_create");
+	zwlr_screencopy_frame_v1_copy(output->frame, output->buffer);
 }
 
 static void
@@ -100,7 +165,6 @@ screencopy_frame_handle_ready(void *data,
 	zwlr_screencopy_frame_v1_destroy(output->frame);
 	output->frame = NULL;
 
-	output->ready = true;
 	wl_surface_commit(output->surface);
 }
 
@@ -110,8 +174,7 @@ screencopy_frame_handle_failed(void *data,
 {
 	Output *output = data;
 
-	fprintf(stderr, "failed to copy output %d\n", output->wl_name);
-	exit(EXIT_FAILURE);
+	errx(EXIT_FAILURE, "failed to frame output %d", output->wl_name);
 }
 
 static const struct zwlr_screencopy_frame_v1_listener screencopy_frame_listener = {
@@ -122,10 +185,23 @@ static const struct zwlr_screencopy_frame_v1_listener screencopy_frame_listener 
 };
 
 static void
+surface_handle_enter(void *data, struct wl_surface *surface,
+		struct wl_output *wl_output)
+{
+	Output *output = data;
+	output->frozen = true;
+}
+
+static const struct wl_surface_listener surface_listener = {
+	.enter = surface_handle_enter,
+	.leave = noop
+};
+
+static void
 output_destroy(Output *output)
 {
 	wl_list_remove(&output->link);
-	poolbuf_destroy(output->buffer);
+	wl_buffer_destroy(output->buffer);
 	zwlr_layer_surface_v1_destroy(output->layer_surface);
 	wl_surface_destroy(output->surface);
 	wl_output_destroy(output->wl_output);
@@ -161,19 +237,19 @@ output_handle_done(void *data, struct wl_output *wl_output)
 		&screencopy_frame_listener, output);
 
 	output->surface = wl_compositor_create_surface(compositor);
+	wl_surface_set_buffer_transform(output->surface, output->transform);
+	wl_surface_add_listener(output->surface, &surface_listener, output);
+
 	output->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 		layer_shell, output->surface, output->wl_output,
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "freeze");
-
-	wl_surface_set_buffer_transform(output->surface, output->transform);
-
-	zwlr_layer_surface_v1_add_listener(output->layer_surface,
-		&layer_surface_listener, output);
 	zwlr_layer_surface_v1_set_exclusive_zone(output->layer_surface, -1);
 	zwlr_layer_surface_v1_set_anchor(output->layer_surface,
 		ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
 		ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
-		
+	zwlr_layer_surface_v1_add_listener(output->layer_surface,
+		&layer_surface_listener, output);
+
 }
 
 static const struct wl_output_listener output_listener = {
@@ -189,16 +265,16 @@ static void
 registry_global(void *data, struct wl_registry *registry,
 		uint32_t name, const char *interface, uint32_t version)
 {
-	if (!strcmp(interface, wl_shm_interface.name))
-		shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
-	else if (!strcmp(interface, wl_compositor_interface.name))
+	if (!strcmp(interface, wl_compositor_interface.name))
 		compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
-	else if (!strcmp(interface, zwlr_screencopy_manager_v1_interface.name))
-		screencopy_manager = wl_registry_bind(registry, name,
-			&zwlr_screencopy_manager_v1_interface, 1);
+	else if (!strcmp(interface, wl_shm_interface.name))
+		shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
 	else if (!strcmp(interface, zwlr_layer_shell_v1_interface.name))
 		layer_shell = wl_registry_bind(registry, name,
 			&zwlr_layer_shell_v1_interface, 2);
+	else if (!strcmp(interface, zwlr_screencopy_manager_v1_interface.name))
+		screencopy_manager = wl_registry_bind(registry, name,
+			&zwlr_screencopy_manager_v1_interface, 1);
 	else if (!strcmp(interface, wl_output_interface.name)) {
 		Output *output = calloc(1, sizeof(Output));
 		output->wl_output = wl_registry_bind(registry, name, &wl_output_interface, 4);
@@ -234,9 +310,9 @@ setup(void)
 		errx(EXIT_FAILURE, "no outputs");
 
 	wl_list_for_each(output, &outputs, link)
-		do
-			wl_display_dispatch(display);
-		while (!output->frozen);
+		while (!output->frozen)
+			if (wl_display_dispatch(display) < 0)
+				err(EXIT_FAILURE, "wl_display_dispatch");
 }
 
 static void
@@ -245,8 +321,8 @@ cleanup(void)
 	outputs_destroy();
 	zwlr_screencopy_manager_v1_destroy(screencopy_manager);
 	zwlr_layer_shell_v1_destroy(layer_shell);
-	wl_compositor_destroy(compositor);
 	wl_shm_destroy(shm);
+	wl_compositor_destroy(compositor);
 	wl_registry_destroy(registry);
 	wl_display_disconnect(display);
 }
@@ -260,10 +336,9 @@ main(int argc, char *argv[])
 	if (argc < 2) {
 		fprintf(stderr, "usage: %s cmd [arg ...]\n", argv[0]);
 		return EXIT_FAILURE;
-	} else {
-		argc--;
-		argv++;
 	}
+	argc--;
+	argv++;
 
 	setup();
 
@@ -274,8 +349,8 @@ main(int argc, char *argv[])
 		execvp(argv[0], argv);
 		err(EXIT_FAILURE, "execvp");
 	}
-	while (waitpid(pid, &status, WNOHANG) != pid)
-		;
+	if (waitpid(pid, &status, 0) != pid)
+		err(EXIT_FAILURE, "waitpid");
 
 	cleanup();
 
