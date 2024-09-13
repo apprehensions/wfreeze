@@ -1,5 +1,7 @@
 .POSIX:
 
+VERSION = 0
+
 PREFIX = /usr/local
 
 PKG_CONFIG = pkg-config
@@ -8,7 +10,7 @@ PKGS = wayland-client
 INCS != $(PKG_CONFIG) --cflags $(PKGS)
 LIBS != $(PKG_CONFIG) --libs $(PKGS)
 
-WFCPPFLAGS = -D_GNU_SOURCE $(CPPFLAGS)
+WFCPPFLAGS = -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE $(CPPFLAGS)
 WFCFLAGS   = -pedantic -Wall $(INCS) $(WFCPPFLAGS) $(CFLAGS)
 LDLIBS     = $(LIBS)
 

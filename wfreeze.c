@@ -332,9 +332,11 @@ main(int argc, char *argv[])
 {
 	pid_t pid;
 	int status;
-
-	if (argc < 2) {
-		fprintf(stderr, "usage: %s cmd [arg ...]\n", argv[0]);
+	if (argc == 2 && !strcmp("-v", argv[1])) {
+		puts("wfreeze " VERSION);
+		return EXIT_SUCCESS;
+	} else if (argc < 2) {
+		fprintf(stderr, "usage: %s [-v] cmd [arg ...]\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 	argc--;
