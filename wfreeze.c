@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 #ifdef __linux__
@@ -39,6 +40,8 @@ static struct zwlr_layer_shell_v1 *layer_shell;
 static struct zwlr_screencopy_manager_v1 *screencopy_manager;
 
 static struct wl_list outputs;
+
+static const char usage[] = "usage: wfreeze [-bhv] cmd [arg ...]\n";
 
 static void
 noop()
@@ -313,6 +316,7 @@ setup(void)
 		while (!output->frozen)
 			if (wl_display_dispatch(display) < 0)
 				err(EXIT_FAILURE, "wl_display_dispatch");
+	wl_display_roundtrip(display);
 }
 
 static void
@@ -330,19 +334,35 @@ cleanup(void)
 int
 main(int argc, char *argv[])
 {
+	int opt, status;
+	bool before_freeze = false;
+	/* arbitrary wait time for application launch */
+	struct timespec req = { .tv_sec = 0, .tv_nsec = 1000000 };
 	pid_t pid;
-	int status;
-	if (argc == 2 && !strcmp("-v", argv[1])) {
-		puts("wfreeze " VERSION);
-		return EXIT_SUCCESS;
-	} else if (argc < 2) {
-		fprintf(stderr, "usage: %s [-v] cmd [arg ...]\n", argv[0]);
+
+	while ((opt = getopt(argc, argv, "bhv")) != -1) {
+		switch (opt) {
+		case 'b':
+			before_freeze = true;
+			break;
+		case 'v':
+			puts("wfreeze " VERSION);
+			return EXIT_SUCCESS;
+		case 'h':
+		default:
+			fprintf(stderr, usage);
+			return opt == 'h' ? EXIT_SUCCESS : EXIT_FAILURE;
+		}
+	}
+	if (argc - optind < 1) {
+		fprintf(stderr, usage);
 		return EXIT_FAILURE;
 	}
-	argc--;
-	argv++;
+	argv += optind;
+	argc -= optind;
 
-	setup();
+	if (!before_freeze)
+		setup();
 
 	switch ((pid = fork())) {
 	case -1:
@@ -351,6 +371,13 @@ main(int argc, char *argv[])
 		execvp(argv[0], argv);
 		err(EXIT_FAILURE, "execvp");
 	}
+
+	if (before_freeze) {
+		if (nanosleep(&req, NULL) < 0)
+			err(EXIT_FAILURE, "nanosleep");
+		setup();
+	}
+
 	if (waitpid(pid, &status, 0) != pid)
 		err(EXIT_FAILURE, "waitpid");
 
