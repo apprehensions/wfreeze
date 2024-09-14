@@ -28,10 +28,15 @@ On dwl and river, the default command will work fine:
 wfreeze slurp
 ```
 
-If you are on Sway, you will have to use the `-b` flag:
+If you are on Sway, you will have to use the `-b` flag with wfreeze - which
+may or may not work half of the time due to race conditions, or use
+another piece of software that has freezing like capabilities such as [dulcepan],
+which is a screenshotter, or [wayfreeze], which is similar to wfreeze but is
+tested and written in Rust.
 
-```sh
-wfreeze -b slurp
-```
+This is due to the fact the layer shell outlining that compositors have different
+implementations as to how to order and display layer surfaces, such as Sway or Hyprland.
 
 [slurp]: https://github.com/emersion/slurp
+[dulcepan]: https://codeberg.org/vyivel/dulcepan
+[wayfreeze]: https://github.com/Jappie3/wayfreeze
