@@ -1,6 +1,7 @@
 # wfreeze
 
-Freeze the screen, and run a command. Works well with [slurp].
+Freeze the screen, and run a command. Works well with [slurp] and compositors
+such as river and dwl.
 
 No new wayland events are handled after successfully freezing, since
 having new outputs added or disconnected breaks the purpose of freezing.
